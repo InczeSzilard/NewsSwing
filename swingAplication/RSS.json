@@ -1,0 +1,40 @@
+{
+  "rssSources": [
+    {
+      "name": "Info Mures",
+      "url": "https://stiri.infomures.ro/feed/"
+    },
+    {
+      "name": "Zi de Zi",
+      "url": "https://www.zi-de-zi.ro/feed/"
+    },
+    {
+      "name": "Punctul",
+      "url": "https://punctul.ro/feed/"
+    },
+    {
+      "name": "Radio Mures",
+      "url": "https://www.radiomures.ro/feed/"
+    },
+    {
+      "name": "KPTV News",
+      "url": "https://news.kptv.ro/feed/"
+    },
+    {
+      "name": "laTarguMures",
+      "url": "https://latargumures.ro/feed/"
+    },
+    {
+      "name": "Vasarhely.ma",
+      "url": "https://www.vasarhely.ma/feed/"
+    },
+    {
+      "name": "Marosvasarhelyi.info",
+      "url": "https://marosvasarhelyi.info/feed/"
+    },
+    {
+      "name": "Marosvasarhelyi Radio",
+      "url": "https://www.marosvasarhelyiradio.ro/hirek_kategoria/a-nap-hirei/feed/"
+    }
+  ]
+}
