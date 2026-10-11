@@ -1,5 +1,9 @@
-com\mycompany\swingaplication\News.class
+com\mycompany\swingaplication\Database.class
+com\mycompany\swingaplication\Events.class
+com\mycompany\swingaplication\RSSService.class
 com\mycompany\swingaplication\RSSLoader.class
 com\mycompany\swingaplication\RSSparse.class
 com\mycompany\swingaplication\SwingAplication.class
-com\mycompany\swingaplication\splitPane.class
+com\mycompany\swingaplication\News.class
+com\mycompany\swingaplication\NewsDAO.class
+com\mycompany\swingaplication\RSSSource.class
