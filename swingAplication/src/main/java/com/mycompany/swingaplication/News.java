@@ -135,4 +135,8 @@ public class News {
     public String toString() {
         return title;
     }
+
+    void setLanguage(String language) {
+        throw new UnsupportedOperationException("Not supported yet."); // Generated from nbfs://nbhost/SystemFileSystem/Templates/Classes/Code/GeneratedMethodBody
+    }
 }

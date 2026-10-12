@@ -1,384 +1,265 @@
+
 package com.mycompany.swingaplication;
 
-import javax.swing.*;
-import java.awt.*;
+// Import Swing utilities for safely creating the GUI
+// and performing background tasks.
+import javax.swing.SwingUtilities;
+import javax.swing.SwingWorker;
+
+// Import collections used to store news articles and deleted article keys.
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
+/**
+ * Main class of the news application.
+ *
+ * This class starts the graphical interface, connects the Refresh button
+ * to the news-loading process, and loads news from configured RSS sources.
+ *
+ * It also saves downloaded articles to the database and prevents articles
+ * previously deleted by the user from being loaded again.
+ */
 public class SwingAplication {
 
+    // Main method: the entry point of the Java application.
     public static void main(String[] args) {
 
-        // =====================================================
-        // 1. CONNECT TO DATABASE
-        // =====================================================
+        // Create and display Swing components on the Event Dispatch Thread.
+        // This is the recommended thread for creating and updating Swing GUIs.
+        SwingUtilities.invokeLater(new Runnable() {
+            public void run() {
 
-        try {
-            Database.getConnection();
-            System.out.println("Database connection successful!");
-        } catch (Exception e) {
-            System.out.println("Database connection failed!");
-            e.printStackTrace();
-        }
+                // Create the main graphical user interface.
+                final NewsGUI gui = new NewsGUI();
 
+                // Connect the Refresh button to the RSS loading process.
+                // When the user clicks Refresh, loadNews() is executed.
+                gui.setRefreshAction(new NewsGUI.RefreshHandler() {
+                    public void refresh() {
+                        loadNews(gui);
+                    }
+                });
 
-        // =====================================================
-        // 2. LOAD RSS SOURCES FROM RSS.json
-        // =====================================================
+                // Display the application window.
+                gui.setVisible(true);
 
-        RSSLoader loader = new RSSLoader();
+                // Automatically load news when the application starts.
+                loadNews(gui);
+            }
+        });
+    }
 
-        RSSparse sources = loader.loadSources();
+    // ------------------------------------------------------------
+    // LOAD NEWS FROM RSS SOURCES
+    // ------------------------------------------------------------
 
-        // This list will contain all downloaded news
-        List<News> allNews = new ArrayList<>();
+    /**
+     * Loads news articles from the configured RSS sources.
+     *
+     * A SwingWorker is used so that database operations and RSS downloads
+     * run in the background without freezing the graphical interface.
+     *
+     *   the graphical interface that displays the news
+     */
+    private static void loadNews(final NewsGUI gui) {
 
-        RSSService rssService = new RSSService();
+        // Disable relevant controls and display a loading message.
+        gui.setLoading(true, "Loading news...");
 
-        NewsDAO newsDAO = new NewsDAO();
+        // SwingWorker separates background processing from GUI updates.
+        // List<News> is the background task's result type.
+        // String is the type of progress messages sent to the GUI.
+        SwingWorker<List<News>, String> worker =
+                new SwingWorker<List<News>, String>() {
 
+            // ----------------------------------------------------
+            // BACKGROUND TASK
+            // ----------------------------------------------------
 
-        // =====================================================
-        // 3. DOWNLOAD RSS NEWS
-        // =====================================================
+            // Executes database operations and RSS downloads in the background.
+            // This method must not directly update Swing components.
+            protected List<News> doInBackground() {
 
-        if (sources != null && sources.getRssSources() != null) {
-
-            for (RSSSource source : sources.getRssSources()) {
-
-                System.out.println(
-                        "Loading: " + source.getName()
-                );
+                // Stores all articles successfully collected from RSS sources.
+                List<News> allNews = new ArrayList<News>();
 
                 try {
+                    // Establish or initialize the database connection.
+                    Database.getConnection();
 
-                    List<News> news =
-                            rssService.loadNews(source);
+                    // Send a progress message to process().
+                    publish("Database connection successful.");
 
-                    System.out.println(
-                            "Found "
-                            + news.size()
-                            + " news from "
-                            + source.getName()
-                    );
+                    // Create a helper for managing deleted articles.
+                    NewsCleaner cleaner = new NewsCleaner();
 
+                    // Load the unique keys of articles previously deleted
+                    // by the user. These articles should not reappear
+                    // during subsequent RSS refreshes.
+                    Set<String> deletedKeys =
+                            cleaner.loadDeletedKeys();
 
-                    // Go through every article
-                    for (News item : news) {
+                    // Create the RSS configuration loader.
+                    RSSLoader loader = new RSSLoader();
 
-                        // Add article to list for Swing
-                        allNews.add(item);
+                    // Read the configured RSS sources.
+                    RSSparse sources = loader.loadSources();
 
-                        // Save article to database
-                        newsDAO.save(item);
+                    // Stop if the configuration or source list is missing.
+                    if (sources == null
+                            || sources.getRssSources() == null) {
+
+                        // Inform the user that no sources are configured.
+                        publish("No RSS sources found.");
+
+                        // Return an empty collection of articles.
+                        return allNews;
                     }
 
+                    // Create the service responsible for downloading
+                    // and parsing RSS feeds.
+                    RSSService rssService = new RSSService();
+
+                    // Create the database access object used to save articles.
+                    NewsDAO newsDAO = new NewsDAO();
+
+                    // ------------------------------------------------
+                    // PROCESS EACH RSS SOURCE
+                    // ------------------------------------------------
+
+                    // Download articles from every configured RSS source.
+                    for (RSSSource source : sources.getRssSources()) {
+
+                        // Display the name of the source currently being loaded.
+                        publish("Loading: " + source.getName());
+
+                        try {
+                            // Download and parse articles from this RSS source.
+                            List<News> articles =
+                                    rssService.loadNews(source);
+
+                            // Skip this source if no article list is returned.
+                            if (articles == null) {
+                                continue;
+                            }
+
+                            // Process each article downloaded from the source.
+                            for (News article : articles) {
+
+                                // Ignore null entries.
+                                if (article == null) {
+                                    continue;
+                                }
+
+                                // Skip articles previously deleted by the user.
+                                // NewsCleaner.key() creates the key used to
+                                // identify an article in the deletion records.
+                                if (deletedKeys.contains(
+                                        NewsCleaner.key(article))) {
+                                    continue;
+                                }
+
+                                // Add the article to the collection that will
+                                // eventually be displayed in the GUI.
+                                allNews.add(article);
+
+                                // ------------------------------------
+                                // SAVE ARTICLE TO THE DATABASE
+                                // ------------------------------------
+
+                                try {
+                                    // Insert or update the article in the database.
+                                    newsDAO.save(article);
+
+                                } catch (Exception e) {
+
+                                    // Report a database-saving error without
+                                    // stopping the processing of other articles.
+                                    publish("Could not save article: "
+                                            + e.getMessage());
+                                }
+                            }
+
+                        } catch (Exception e) {
+
+                            // Report an error for this RSS source.
+                            // The loop can continue with the next source.
+                            publish("Could not load "
+                                    + source.getName() + ": "
+                                    + e.getMessage());
+                        }
+                    }
 
                 } catch (Exception e) {
 
-                    System.out.println(
-                            "Could not load "
-                            + source.getName()
-                    );
-
-                    System.out.println(
-                            e.getMessage()
-                    );
+                    // Handle errors involving the database connection,
+                    // deleted-article records, or RSS configuration.
+                    publish("News loading failed: " + e.getMessage());
                 }
+
+                // Return all collected articles to the SwingWorker.
+                // The done() method retrieves this result.
+                return allNews;
             }
-        }
 
+            // ----------------------------------------------------
+            // PROCESS PROGRESS MESSAGES
+            // ----------------------------------------------------
 
-        // =====================================================
-        // 4. CHECK HOW MANY NEWS WE HAVE
-        // =====================================================
+            // Runs on Swing's Event Dispatch Thread.
+            // It receives messages previously sent with publish().
+            protected void process(List<String> messages) {
 
-        System.out.println(
-                "TOTAL NEWS: " + allNews.size()
-        );
+                // Display each progress message in the GUI status bar.
+                for (String message : messages) {
 
+                    // Update the status text in the application window.
+                    gui.setStatus(message);
 
-        // =====================================================
-        // 5. CREATE WINDOW
-        // =====================================================
-
-        JFrame frame =
-                new JFrame("News Application");
-
-
-        // =====================================================
-        // 6. CREATE NEWS LIST
-        // =====================================================
-
-        DefaultListModel<News> newsModel =
-                new DefaultListModel<>();
-
-
-        // Put all RSS news into the list model
-        for (News news : allNews) {
-
-            newsModel.addElement(news);
-        }
-
-
-        // Create JList
-        JList<News> newsList =
-                new JList<>();
-
-
-        // Give the model to the JList
-        newsList.setModel(newsModel);
-
-
-        // Make the text a little easier to read
-        newsList.setFont(
-                new Font(
-                        "Arial",
-                        Font.PLAIN,
-                        14
-                )
-        );
-
-
-        // =====================================================
-        // 7. SEARCH
-        // =====================================================
-
-        JTextField searchField =
-                new JTextField(20);
-
-        JButton searchButton =
-                new JButton("Search");
-
-
-        searchButton.addActionListener(e -> {
-
-            String searchText =
-                    searchField
-                            .getText()
-                            .toLowerCase()
-                            .trim();
-
-
-            DefaultListModel<News> model =
-                    new DefaultListModel<>();
-
-
-            // Search ONLY in titles
-            for (News news : allNews) {
-
-                if (news.getTitle() != null
-                        && news.getTitle()
-                        .toLowerCase()
-                        .contains(searchText)) {
-
-                    model.addElement(news);
+                    // Also print the message to the console for debugging.
+                    System.out.println(message);
                 }
             }
 
+            // ----------------------------------------------------
+            // FINISH BACKGROUND PROCESSING
+            // ----------------------------------------------------
 
-            newsList.setModel(model);
+            // Called automatically when doInBackground() finishes.
+            // This method runs on Swing's Event Dispatch Thread.
+            protected void done() {
+                try {
+                    // Retrieve the article collection returned by the
+                    // background task. get() also reports task failures.
+                    List<News> articles = get();
 
+                    // Pass the downloaded articles to the GUI.
+                    // NewsGUI updates its article list and applies filters.
+                    gui.setNews(articles);
 
-            // Automatically select first result
-            if (model.size() > 0) {
+                    // Display the total number of collected articles.
+                    gui.setStatus("Finished. Total news: "
+                            + articles.size());
 
-                newsList.setSelectedIndex(0);
-            }
-        });
+                } catch (Exception e) {
 
+                    // Report an error if the background result could
+                    // not be retrieved or the task failed.
+                    gui.setStatus("Could not finish loading: "
+                            + e.getMessage());
 
-        // =====================================================
-        // 8. LANGUAGE
-        // =====================================================
+                } finally {
 
-
-JComboBox<String> languageBox =
-        new JComboBox<>(
-                new String[]{
-                        "All",
-                        "English",
-                        "Romanian",
-                        "German",
-                        "French",
-                        "Hungarian"
+                    // Always re-enable the GUI controls when processing ends,
+                    // whether the operation succeeds or fails.
+                    gui.setLoading(false, null);
                 }
-        );
-
-        // =====================================================
-        // 9. TOP PANEL
-        // =====================================================
-
-        JPanel topPanel =
-                new JPanel();
-
-
-        topPanel.add(
-                new JLabel("Language:")
-        );
-
-        topPanel.add(languageBox);
-
-
-        topPanel.add(
-                new JLabel("Search title:")
-        );
-
-        topPanel.add(searchField);
-
-        topPanel.add(searchButton);
-
-
-        // =====================================================
-        // 10. LEFT SIDE
-        // =====================================================
-
-        JScrollPane leftPanel =
-                new JScrollPane(newsList);
-
-
-        // =====================================================
-        // 11. RIGHT SIDE
-        // =====================================================
-
-        JTextArea newsContent =
-                new JTextArea();
-
-
-        newsContent.setEditable(false);
-
-        newsContent.setLineWrap(true);
-
-        newsContent.setWrapStyleWord(true);
-
-
-        newsContent.setFont(
-                new Font(
-                        "Arial",
-                        Font.PLAIN,
-                        15
-                )
-        );
-
-
-        JScrollPane rightPanel =
-                new JScrollPane(newsContent);
-
-
-        // =====================================================
-        // 12. SPLIT WINDOW
-        // =====================================================
-
-        JSplitPane splitPane =
-                new JSplitPane(
-                        JSplitPane.HORIZONTAL_SPLIT,
-                        leftPanel,
-                        rightPanel
-                );
-
-
-        // Width of left side
-        splitPane.setDividerLocation(350);
-
-
-        // =====================================================
-        // 13. WHEN A NEWS ARTICLE IS SELECTED
-        // =====================================================
-
-        newsList.addListSelectionListener(e -> {
-
-            News selectedNews =
-                    newsList.getSelectedValue();
-
-
-            if (selectedNews != null) {
-
-                String title =
-                        selectedNews.getTitle();
-
-                String source =
-                        selectedNews.getSource();
-
-                String description =
-                        selectedNews.getDescription();
-
-                String url =
-                        selectedNews.getUrl();
-
-
-                // Put the article information
-                // into the right side
-                newsContent.setText(
-                        "TITLE\n"
-                        + "========================================\n\n"
-                        + title
-                        + "\n\n"
-
-                        + "SOURCE\n"
-                        + "========================================\n\n"
-                        + source
-                        + "\n\n"
-
-                        + "DESCRIPTION\n"
-                        + "========================================\n\n"
-                        + description
-                        + "\n\n"
-
-                        + "URL\n"
-                        + "========================================\n\n"
-                        + url
-                );
-
-
-                // Start at the top
-                newsContent.setCaretPosition(0);
             }
-        });
+        };
 
-
-        // =====================================================
-        // 14. AUTOMATICALLY SELECT FIRST NEWS
-        // =====================================================
-
-        if (newsModel.size() > 0) {
-
-            newsList.setSelectedIndex(0);
-        }
-
-
-        // =====================================================
-        // 15. ADD PANELS TO WINDOW
-        // =====================================================
-
-        frame.add(
-                topPanel,
-                BorderLayout.NORTH
-        );
-
-        frame.add(
-                splitPane,
-                BorderLayout.CENTER
-        );
-
-
-        // =====================================================
-        // 16. WINDOW SETTINGS
-        // =====================================================
-
-        frame.setSize(
-                1000,
-                650
-        );
-
-
-        frame.setDefaultCloseOperation(
-                JFrame.EXIT_ON_CLOSE
-        );
-
-
-        frame.setLocationRelativeTo(null);
-
-
-        frame.setVisible(true);
+        // Start the SwingWorker.
+        // doInBackground() runs on a worker thread, keeping the GUI responsive.
+        worker.execute();
     }
 }
