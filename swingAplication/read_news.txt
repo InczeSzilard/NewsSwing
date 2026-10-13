@@ -1,0 +1,4 @@
+feeds.bbci.co.uk|https://www.bbc.co.uk/news/articles/cmglw0r21zexo?at_medium=RSS&at_campaign=rss
+Vasarhely.ma|https://www.vasarhely.ma/fuszulykaleves-csulokkel/
+Vasarhely.ma|https://www.vasarhely.ma/belebonyolodtak-a-szerencsejatek-rendeletet-ugyebe-marosvasarhelyen/
+Marosvasarhelyi.info|https://marosvasarhelyi.info/hirek/mar-hetfon-megmozdul-a-varos-rajtol-a-vasarhelyi-forgatag

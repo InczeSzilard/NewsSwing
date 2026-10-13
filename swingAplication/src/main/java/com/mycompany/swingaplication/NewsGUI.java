@@ -219,19 +219,28 @@ public class NewsGUI extends JFrame {
         JPanel coverPanel = new JPanel(new BorderLayout());
         coverPanel.add(coverLabel, BorderLayout.CENTER);
 
-        // Toolbar: language filter, search box and all buttons in one row.
-        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        topPanel.add(new JLabel("Language:"));
-        topPanel.add(languageBox);
-        topPanel.add(new JLabel("Search title:"));
-        topPanel.add(searchField);
-        topPanel.add(addButton);
-        topPanel.add(deleteButton);
-        topPanel.add(openButton);
-        topPanel.add(toggleReadButton);
-        topPanel.add(refreshButton);
-        topPanel.add(updateButton);
-        topPanel.add(clearDatabaseButton);
+        // Toolbar in two rows, so no button is cut off when the window is narrow.
+        // Row 1: language filter and search box.
+        JPanel filterRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        filterRow.add(new JLabel("Language:"));
+        filterRow.add(languageBox);
+        filterRow.add(new JLabel("Search title:"));
+        filterRow.add(searchField);
+
+        // Row 2: all the buttons (Clear Database is the last one).
+        JPanel buttonRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        buttonRow.add(addButton);
+        buttonRow.add(deleteButton);
+        buttonRow.add(openButton);
+        buttonRow.add(toggleReadButton);
+        buttonRow.add(refreshButton);
+        buttonRow.add(updateButton);
+        buttonRow.add(clearDatabaseButton);
+
+        // Stack the two rows on top of each other.
+        JPanel topPanel = new JPanel(new GridLayout(2, 1));
+        topPanel.add(filterRow);
+        topPanel.add(buttonRow);
 
         // Tooltips shown when hovering over the buttons.
         openButton.setToolTipText("Open the selected article or double-click it");
