@@ -1,1070 +1,934 @@
-
 package com.mycompany.swingaplication;
 
-// Import Swing components used to create the graphical interface.
 import javax.swing.*;
-
-// Import events used to detect document changes and list selections.
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import javax.swing.event.ListSelectionEvent;
 import javax.swing.event.ListSelectionListener;
-
-// Import AWT classes for layouts, dimensions, fonts, images, and desktop integration.
 import java.awt.*;
-
-// Import event classes for button clicks, focus changes, and mouse actions.
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.awt.event.FocusAdapter;
 import java.awt.event.FocusEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
-
-// Import classes used to open article URLs in the default web browser.
+import java.io.IOException;
 import java.net.URI;
-
-// Import Normalizer to remove accents when searching article titles.
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.text.Normalizer;
-
-// Import collection classes used to store articles.
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
- * NewsGUI represents the graphical user interface of the news application.
+ * Main Swing interface for the news application.
  *
- * It allows users to:
- * - View saved news articles.
- * - Search articles by title.
- * - Filter articles by language.
- * - View article details.
- * - Open articles in a web browser.
- * - Add URLs through an external handler.
- * - Delete articles or clear the database.
- * - Refresh the news collection.
+ * Keeps the existing search, autocomplete, language filter, article details,
+ * add URL, delete, clear database, refresh, and browser-opening features.
+ * Includes an indeterminate progress bar while the controller updates news.
  *
- * The class extends JFrame, which represents the main application window.
+ * How the pieces fit together:
+ *  - allNews    : the full list of articles (everything loaded from the database).
+ *  - newsModel  : only the articles currently shown (allNews after filtering).
+ *  - applyFilters() rebuilds newsModel from allNews using the language box
+ *    and the search field.
  */
 public class NewsGUI extends JFrame {
 
-    // Stores the articles currently displayed in the JList.
-    private final DefaultListModel newsModel =
-            new DefaultListModel();
+    // ------------------------------------------------------------
+    // FIELDS
+    // ------------------------------------------------------------
 
-    // Displays the articles stored in newsModel.
-    private final JList newsList =
-            new JList(newsModel);
+    // Model behind the article list: holds only the articles that pass the filters.
+    private final DefaultListModel<News> newsModel = new DefaultListModel<>();
 
-    // Allows users to enter text to search for article titles.
-    private final JTextField searchField =
-            new JTextField(20);
+    // The visible list on the left side; displays News.toString() (the title).
+    private final JList<News> newsList = new JList<>(newsModel);
 
-    // Popup menu used to display autocomplete suggestions.
-    private final JPopupMenu suggestionsPopup =
-            new JPopupMenu();
+    // Text box used to search article titles.
+    private final JTextField searchField = new JTextField(20);
 
-    // Maximum number of autocomplete suggestions displayed at once.
+    // Dropdown that shows title suggestions under the search field.
+    private final JPopupMenu suggestionsPopup = new JPopupMenu();
+
+    // Maximum number of suggestions shown in the popup.
     private static final int MAX_SUGGESTIONS = 8;
 
-    // Dropdown menu used to filter articles by language.
-    private final JComboBox languageBox =
-            new JComboBox(new String[] {
-                "All",
-                "English",
-                "Romanian",
-                "Hungarian"
-            });
+    // Language filter. The text must match the cases in languageMatches().
+    private final JComboBox<String> languageBox = new JComboBox<>(
+            new String[]{"All", "English", "Romanian", "Hungarian"});
 
-    // Button used to add a news article or RSS feed URL.
-    private final JButton addButton =
-            new JButton("Add URL");
+    // Toolbar buttons.
+    private final JButton addButton = new JButton("Add URL");
+    private final JButton deleteButton = new JButton("Delete Selected");
+    private final JButton openButton = new JButton("Open in Browser");
+    private final JButton toggleReadButton = new JButton("Mark Read/Unread");
+    private final JButton refreshButton = new JButton("Refresh");
+    private final JButton updateButton = new JButton("Update News");
+    private final JButton clearDatabaseButton = new JButton("Clear Database");
 
-    // Button used to delete the selected article.
-    private final JButton deleteButton =
-            new JButton("Delete Selected");
+    // Right-hand panel showing the details of the selected article (read-only).
+    private final JTextArea newsContent = new JTextArea();
 
-    // Button used to open the selected article in a browser.
-    private final JButton openButton =
-            new JButton("Open in Browser");
+    // Status line at the bottom of the window.
+    private final JLabel statusLabel = new JLabel("Ready");
 
-    // Button used to download or reload news.
-    private final JButton refreshButton =
-            new JButton("Refresh");
+    // Busy indicators, visible only while the news is being updated.
+    private final JLabel loadingIconLabel = new JLabel("⟳");
+    private final JProgressBar loadingBar = new JProgressBar();
 
-    // Button used to remove all saved news and deletion records.
-    private final JButton clearDatabaseButton =
-            new JButton("Clear Database");
-
-    // Displays the title, source, description, and URL of an article.
-    private final JTextArea newsContent =
-            new JTextArea();
-
-    // Displays messages about the current application state.
-    private final JLabel statusLabel =
-            new JLabel("Ready");
-
-    // JLabel used to display the cover image at the top of the window.
+    // Banner at the top: the cover image, or a fallback text banner.
     private JLabel coverLabel;
-
-    // Stores the scaled cover image.
     private ImageIcon coverIcon;
 
-    // Stores all articles received from the application controller.
-    // Filtering is performed on this collection.
-    private List<News> allNews =
-            new ArrayList<News>();
+    // Every article currently loaded (unfiltered).
+    private List<News> allNews = new ArrayList<>();
 
-    // Handles operations involving article deletion and database clearing.
-    private final NewsCleaner newsCleaner =
-            new NewsCleaner();
+    // Helper class that deletes articles / clears the database.
+    private final NewsCleaner newsCleaner = new NewsCleaner();
 
-    /**
-     * Interface for connecting the Refresh button to the class
-     * responsible for downloading or reloading news.
-     */
+    // File (in the program's working folder) that remembers which articles were read.
+    private static final String READ_FILE = "read_news.txt";
+
+    // Keys ("source|url") of the articles the user has read.
+    private final Set<String> readKeys = new HashSet<>();
+
+    // True while an update is running; prevents starting a second one.
+    private boolean loading = false;
+
+    // True once a refresh action has been connected (currently not read anywhere).
+    private boolean updateHandlerConfigured = false;
+
+    // ------------------------------------------------------------
+    // CALLBACK INTERFACES
+    // The controller implements these so the GUI can ask it to do work
+    // without knowing how the work is done.
+    // ------------------------------------------------------------
+
+    // Called when the user clicks Refresh or Update News.
     public interface RefreshHandler {
         void refresh();
     }
 
-    /**
-     * Interface for connecting the Add URL button to the class
-     * responsible for downloading an article or RSS feed.
-     */
+    // Called when the user adds a URL; receives the validated URL and the
+    // language chosen for it ("English", "Romanian" or "Hungarian").
     public interface AddUrlHandler {
-        void addUrl(String url);
+        void addUrl(String url, String language);
     }
 
-    // References to the external operations supplied by the controller.
     private RefreshHandler refreshAction;
     private AddUrlHandler addUrlAction;
 
-    /**
-     * Constructor of the NewsGUI window.
-     * Initializes the interface, registers event handlers,
-     * and configures the window dimensions and position.
-     */
+    // ------------------------------------------------------------
+    // CONSTRUCTOR
+    // ------------------------------------------------------------
+
     public NewsGUI() {
-        super("News Application");
+        super("News Application");   // window title
+        loadReadState();             // restore which articles were read last time
+        buildGUI();                  // create and arrange the components
+        addEvents();                 // attach listeners to the components
 
-        // Create and arrange all visual components.
-        buildGUI();
-
-        // Connect buttons, search fields, and selection events.
-        addEvents();
-
-        // Close the application when the window is closed.
-        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-
-        // Set the initial window size.
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);  // closing the window ends the program
         setSize(1200, 750);
-
-        // Prevent the window from becoming too small.
         setMinimumSize(new Dimension(850, 500));
-
-        // Center the window on the screen.
-        setLocationRelativeTo(null);
+        setLocationRelativeTo(null); // center on screen
     }
 
     // ------------------------------------------------------------
-    // LOAD THE COVER IMAGE
+    // COVER IMAGE
     // ------------------------------------------------------------
 
-    /**
-     * Loads the cover image from a specified file path.
-     *
-     * If the image exists, it is scaled while preserving its
-     * aspect ratio. If the image cannot be found, a text-based
-     * WORLD NEWS banner is displayed instead.
-     */
+    // Loads the banner image from the project resources and scales it to fit;
+    // falls back to a plain text banner if the image cannot be found or read.
     private void createCoverImage() {
+        // The image is loaded from the classpath (src/main/resources), not from
+        // a path on this computer. It is packaged inside the .jar, so it works
+        // for every user. The leading "/" means "start from the resources root".
+        java.net.URL imageUrl = NewsGUI.class.getResource(
+                "/com/mycompany/swingaplication/coverimage.jpg");
 
-        // Absolute path to the cover image on the local computer.
-        String imagePath =
-            "C:\\Users\\szila\\Documents\\NetBeansProjects\\swingAplication\\src\\main\\java\\com\\mycompany\\swingaplication\\coverimage.jpg";
+        // getResource returns null when the file is not in the resources.
+        if (imageUrl == null) {
+            createFallbackCover();
+            System.err.println("Cover image not found in the resources.");
+            return;
+        }
 
-        // Create a File object representing the image file.
-        java.io.File imageFile = new java.io.File(imagePath);
+        ImageIcon originalIcon = new ImageIcon(imageUrl);
+        Image originalImage = originalIcon.getImage();
 
-        // Check that the path points to an existing regular file.
-        if (imageFile.exists() && imageFile.isFile()) {
+        int originalWidth = originalIcon.getIconWidth();
+        int originalHeight = originalIcon.getIconHeight();
 
-            // Load the original image.
-            ImageIcon originalIcon = new ImageIcon(imagePath);
+        // Size of the banner area.
+        int targetWidth = 1100;
+        int targetHeight = 300;
 
-            Image originalImage = originalIcon.getImage();
-
-            // Obtain the original image dimensions.
-            int originalWidth = originalIcon.getIconWidth();
-            int originalHeight = originalIcon.getIconHeight();
-
-            // Define the target dimensions for the cover area.
-            int targetWidth = 7000;
-            int targetHeight = 400;
-
-            // Calculate a scaling factor that fits the image
-            // inside the target dimensions without distortion.
+        // Width/height are <= 0 when the image could not be decoded.
+        if (originalWidth > 0 && originalHeight > 0) {
+            // Pick the smaller ratio so the image fits inside the target
+            // box while keeping its proportions.
             double scale = Math.min(
-                (double) targetWidth / originalWidth,
-                (double) targetHeight / originalHeight
-            );
+                    (double) targetWidth / originalWidth,
+                    (double) targetHeight / originalHeight);
 
-            // Calculate the scaled image dimensions.
-            int scaledWidth = (int) (originalWidth * scale);
-            int scaledHeight = (int) (originalHeight * scale);
+            // Math.max(1, ...) guarantees the size is never 0.
+            int scaledWidth = Math.max(1, (int) (originalWidth * scale));
+            int scaledHeight = Math.max(1, (int) (originalHeight * scale));
 
-            // Resize the image using smooth interpolation.
             Image scaledImage = originalImage.getScaledInstance(
-                scaledWidth,
-                scaledHeight,
-                Image.SCALE_SMOOTH
-            );
+                    scaledWidth, scaledHeight, Image.SCALE_SMOOTH);
 
-            // Store the scaled image in an ImageIcon.
             coverIcon = new ImageIcon(scaledImage);
-
-            // Create a label that displays the cover image.
-            coverLabel = new JLabel(
-                coverIcon,
-                SwingConstants.CENTER
-            );
-
-            // Set the preferred size of the cover label.
-            coverLabel.setPreferredSize(
-                new Dimension(targetWidth, targetHeight)
-            );
-
-            // Print a message to the console for debugging.
-            System.out.println("Cover image loaded: " + imagePath);
-
+            coverLabel = new JLabel(coverIcon, SwingConstants.CENTER);
+            coverLabel.setPreferredSize(new Dimension(targetWidth, targetHeight));
+            System.out.println("Cover image loaded: " + imageUrl);
         } else {
-
-            // If the image is missing, create a text banner.
-            coverLabel = new JLabel(
-                "WORLD NEWS",
-                SwingConstants.CENTER
-            );
-
-            // Set the banner text font.
-            coverLabel.setFont(
-                new Font("Arial", Font.BOLD, 30)
-            );
-
-            // Set white text on a dark blue background.
-            coverLabel.setForeground(Color.WHITE);
-            coverLabel.setBackground(new Color(20, 40, 75));
-
-            // Make the background color visible.
-            coverLabel.setOpaque(true);
-
-            // Print an error message to the console.
-            System.err.println("Image not found: " + imagePath);
+            createFallbackCover();
         }
     }
 
-    // ------------------------------------------------------------
-    // BUILD THE GUI
-    // ------------------------------------------------------------
-
-    /**
-     * Creates and arranges the graphical components.
-     *
-     * The main window contains:
-     * - A header with the cover image and search controls.
-     * - A split area containing the article list and article details.
-     * - A status bar at the bottom.
-     */
-    private void buildGUI() {
-
-        // Use BorderLayout to divide the window into five regions.
-        setLayout(new BorderLayout(5, 5));
-
-        // Load the cover image or the fallback banner.
-        createCoverImage();
-
-        // Create a panel for the cover image.
-        JPanel coverPanel =
-                new JPanel(new BorderLayout());
-
-        // Place the cover image in the center of its panel.
-        coverPanel.add(
-                coverLabel,
-                BorderLayout.CENTER
-        );
-
-        // Create a panel containing the search controls and buttons.
-        JPanel topPanel =
-                new JPanel(new FlowLayout(FlowLayout.LEFT));
-
-        // Add the language filter.
-        topPanel.add(new JLabel("Language:"));
-        topPanel.add(languageBox);
-
-        // Add the article title search field.
-        topPanel.add(new JLabel("Search title:"));
-        topPanel.add(searchField);
-
-        // Add the application action buttons.
-        topPanel.add(addButton);
-        topPanel.add(deleteButton);
-        topPanel.add(openButton);
-        topPanel.add(refreshButton);
-        topPanel.add(clearDatabaseButton);
-
-        // Explain how to open an article using the tooltip.
-        openButton.setToolTipText(
-                "Open the selected article or double-click it"
-        );
-
-        // Allow only one article to be selected at a time.
-        newsList.setSelectionMode(
-                ListSelectionModel.SINGLE_SELECTION
-        );
-
-        // Set the font used for article titles in the list.
-        newsList.setFont(
-                new Font("Arial", Font.PLAIN, 14)
-        );
-
-        // Prevent users from editing the article details.
-        newsContent.setEditable(false);
-
-        // Enable automatic line wrapping in the article details.
-        newsContent.setLineWrap(true);
-        newsContent.setWrapStyleWord(true);
-
-        // Set the font used to display article details.
-        newsContent.setFont(
-                new Font("Arial", Font.PLAIN, 15)
-        );
-
-        // Add scrollbars to the article list.
-        JScrollPane leftPanel =
-                new JScrollPane(newsList);
-
-        // Add scrollbars to the article details area.
-        JScrollPane rightPanel =
-                new JScrollPane(newsContent);
-
-        // Divide the main content area into two resizable sections.
-        JSplitPane splitPane = new JSplitPane(
-                JSplitPane.HORIZONTAL_SPLIT,
-                leftPanel,
-                rightPanel
-        );
-
-        // Set the initial width of the article list.
-        splitPane.setDividerLocation(350);
-
-        // Allocate approximately 35% of the extra width to the left.
-        splitPane.setResizeWeight(0.35);
-
-        // Add padding around the status message.
-        statusLabel.setBorder(
-                BorderFactory.createEmptyBorder(
-                        5, 10, 5, 10
-                )
-        );
-
-        // Create the header containing the cover and controls.
-        JPanel headerPanel =
-                new JPanel(new BorderLayout());
-
-        // Place the cover image at the top of the header.
-        headerPanel.add(
-                coverPanel,
-                BorderLayout.CENTER
-        );
-
-        // Place the search controls below the cover image.
-        headerPanel.add(
-                topPanel,
-                BorderLayout.SOUTH
-        );
-
-        // Add the header to the top of the main window.
-        add(headerPanel, BorderLayout.NORTH);
-
-        // Add the article list and details to the center.
-        add(splitPane, BorderLayout.CENTER);
-
-        // Add the status bar to the bottom.
-        add(statusLabel, BorderLayout.SOUTH);
+    // Plain dark-blue banner with white text, used when the image is unavailable.
+    private void createFallbackCover() {
+        coverLabel = new JLabel("WORLD NEWS", SwingConstants.CENTER);
+        coverLabel.setFont(new Font("Arial", Font.BOLD, 30));
+        coverLabel.setForeground(Color.WHITE);
+        coverLabel.setBackground(new Color(20, 40, 75));
+        coverLabel.setOpaque(true);  // without this the background color is not painted
+        coverLabel.setPreferredSize(new Dimension(1100, 100));
     }
 
     // ------------------------------------------------------------
-    // EVENT HANDLERS
+    // BUILD GUI
     // ------------------------------------------------------------
 
-    /**
-     * Registers listeners for button clicks, search changes,
-     * language changes, article selection, and focus changes.
-     */
+    // Creates the layout:
+    //   NORTH  : header = cover banner (center) + toolbar (south)
+    //   CENTER : split pane = article list | article details
+    //   SOUTH  : loading indicator (west) + status text (center)
+    private void buildGUI() {
+        setLayout(new BorderLayout(5, 5));
+        createCoverImage();
+
+        JPanel coverPanel = new JPanel(new BorderLayout());
+        coverPanel.add(coverLabel, BorderLayout.CENTER);
+
+        // Toolbar: language filter, search box and all buttons in one row.
+        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        topPanel.add(new JLabel("Language:"));
+        topPanel.add(languageBox);
+        topPanel.add(new JLabel("Search title:"));
+        topPanel.add(searchField);
+        topPanel.add(addButton);
+        topPanel.add(deleteButton);
+        topPanel.add(openButton);
+        topPanel.add(toggleReadButton);
+        topPanel.add(refreshButton);
+        topPanel.add(updateButton);
+        topPanel.add(clearDatabaseButton);
+
+        // Tooltips shown when hovering over the buttons.
+        openButton.setToolTipText("Open the selected article or double-click it");
+        toggleReadButton.setToolTipText("Mark the selected article as read or unread");
+        refreshButton.setToolTipText("Run the configured refresh action");
+        updateButton.setToolTipText("Download/reload the latest news");
+
+        // Only one article can be selected at a time.
+        newsList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        newsList.setFont(new Font("Arial", Font.PLAIN, 14));
+
+        // Custom row painting: unread = bold with a "●" marker,
+        // read = normal weight in gray.
+        newsList.setCellRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list,
+                    Object value, int index, boolean isSelected, boolean cellHasFocus) {
+                // Let the default renderer set up colors, selection, etc.
+                super.getListCellRendererComponent(
+                        list, value, index, isSelected, cellHasFocus);
+
+                if (value instanceof News) {
+                    News n = (News) value;
+                    if (isRead(n)) {
+                        setText("    " + n.getTitle());
+                        setFont(list.getFont().deriveFont(Font.PLAIN));
+                        if (!isSelected) {
+                            setForeground(Color.GRAY);
+                        }
+                    } else {
+                        setText("\u25CF " + n.getTitle());
+                        setFont(list.getFont().deriveFont(Font.BOLD));
+                    }
+                }
+                return this;
+            }
+        });
+
+        // Details area: read-only, wraps long lines at word boundaries.
+        newsContent.setEditable(false);
+        newsContent.setLineWrap(true);
+        newsContent.setWrapStyleWord(true);
+        newsContent.setFont(new Font("Arial", Font.PLAIN, 15));
+
+        // Scroll bars for both sides.
+        JScrollPane leftPanel = new JScrollPane(newsList);
+        JScrollPane rightPanel = new JScrollPane(newsContent);
+
+        // Resizable divider between the list and the details.
+        JSplitPane splitPane = new JSplitPane(
+                JSplitPane.HORIZONTAL_SPLIT, leftPanel, rightPanel);
+        splitPane.setDividerLocation(350);
+        splitPane.setResizeWeight(0.35);  // the list gets 35% of any extra width
+
+        // Animated busy area: indeterminate bar plus a spinner-like symbol.
+        JPanel loadingPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 3));
+        loadingIconLabel.setFont(new Font("SansSerif", Font.BOLD, 22));
+        loadingIconLabel.setForeground(new Color(30, 100, 190));
+        loadingBar.setIndeterminate(true);   // endless animation, no percentage
+        loadingBar.setStringPainted(true);   // show text inside the bar
+        loadingBar.setString("Updating news...");
+        loadingBar.setPreferredSize(new Dimension(190, 20));
+        // Hidden until setLoading(true, ...) is called.
+        loadingBar.setVisible(false);
+        loadingIconLabel.setVisible(false);
+        loadingPanel.add(loadingIconLabel);
+        loadingPanel.add(loadingBar);
+
+        statusLabel.setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 10));
+
+        JPanel bottomPanel = new JPanel(new BorderLayout());
+        bottomPanel.add(loadingPanel, BorderLayout.WEST);
+        bottomPanel.add(statusLabel, BorderLayout.CENTER);
+
+        JPanel headerPanel = new JPanel(new BorderLayout());
+        headerPanel.add(coverPanel, BorderLayout.CENTER);
+        headerPanel.add(topPanel, BorderLayout.SOUTH);
+
+        add(headerPanel, BorderLayout.NORTH);
+        add(splitPane, BorderLayout.CENTER);
+        add(bottomPanel, BorderLayout.SOUTH);
+    }
+
+    // ------------------------------------------------------------
+    // EVENTS
+    // ------------------------------------------------------------
+
+    // Connects every component to its behavior.
     private void addEvents() {
 
-        // ADD URL:
-        // Ask the user for an article URL or RSS feed URL.
+        // ----- Add URL -----
         addButton.addActionListener(new ActionListener() {
+            @Override
             public void actionPerformed(ActionEvent e) {
-
-                // Display a dialog containing a text input field.
+                // Ask the user for a URL. Returns null if they press Cancel.
                 String url = JOptionPane.showInputDialog(
                         NewsGUI.this,
                         "Enter a news article or RSS feed URL:",
                         "Add News",
-                        JOptionPane.PLAIN_MESSAGE
-                );
+                        JOptionPane.PLAIN_MESSAGE);
 
-                // Stop if the user cancels or enters an empty value.
-                if (url == null || url.trim().length() == 0) {
+                // Cancelled or empty: do nothing.
+                if (url == null || url.trim().isEmpty()) {
                     return;
                 }
 
-                // Remove leading and trailing whitespace.
+                // Accept only http:// or https:// followed by non-space characters.
                 final String cleanUrl = url.trim();
-
-                // Perform a basic check for an HTTP or HTTPS URL.
                 if (!cleanUrl.matches("(?i)^https?://\\S+$")) {
-
                     JOptionPane.showMessageDialog(
                             NewsGUI.this,
                             "Please enter a valid HTTP or HTTPS URL.",
                             "Invalid URL",
-                            JOptionPane.WARNING_MESSAGE
-                    );
-
+                            JOptionPane.WARNING_MESSAGE);
                     return;
                 }
 
-                // Pass the URL to the configured external handler.
-                if (addUrlAction != null) {
-                    addUrlAction.addUrl(cleanUrl);
-                } else {
+                // Ask which language this feed is in, so the language filter
+                // works for it. Returns null if the user presses Cancel.
+                String[] languages = {"English", "Romanian", "Hungarian"};
+                String language = (String) JOptionPane.showInputDialog(
+                        NewsGUI.this,
+                        "Language of this feed:",
+                        "Add News",
+                        JOptionPane.PLAIN_MESSAGE,
+                        null,
+                        languages,
+                        languages[0]);
 
-                    // Display a message if no handler was configured.
+                if (language == null) {
+                    return;
+                }
+
+                // Hand the URL and language to the controller, if connected.
+                if (addUrlAction != null) {
+                    addUrlAction.addUrl(cleanUrl, language);
+                } else {
                     JOptionPane.showMessageDialog(
                             NewsGUI.this,
                             "The URL downloader has not been connected.",
                             "Add News",
-                            JOptionPane.INFORMATION_MESSAGE
-                    );
+                            JOptionPane.INFORMATION_MESSAGE);
                 }
             }
         });
 
-        // DELETE SELECTED ARTICLE:
-        // Delete the currently selected article from storage.
+        // ----- Delete Selected -----
         deleteButton.addActionListener(new ActionListener() {
+            @Override
             public void actionPerformed(ActionEvent e) {
+                News selected = newsList.getSelectedValue();
 
-                // Get the selected News object from the list.
-                News selected =
-                        (News) newsList.getSelectedValue();
-
-                // Stop if no article is selected.
+                // Nothing selected: tell the user and stop.
                 if (selected == null) {
                     JOptionPane.showMessageDialog(
                             NewsGUI.this,
                             "Please select an article to delete.",
                             "No Article Selected",
-                            JOptionPane.INFORMATION_MESSAGE
-                    );
+                            JOptionPane.INFORMATION_MESSAGE);
                     return;
                 }
 
-                // Ask the user to confirm permanent deletion.
+                // Ask for confirmation, showing the article title.
                 int answer = JOptionPane.showConfirmDialog(
                         NewsGUI.this,
-                        "Permanently delete this article?\n\n"
-                                + selected.getTitle(),
+                        "Permanently delete this article?\n\n" + selected.getTitle(),
                         "Confirm Delete",
                         JOptionPane.YES_NO_OPTION,
-                        JOptionPane.WARNING_MESSAGE
-                );
+                        JOptionPane.WARNING_MESSAGE);
 
-                // Continue only if the user confirms.
                 if (answer == JOptionPane.YES_OPTION) {
                     try {
-
-                        // Delete the article using the database helper.
-                        newsCleaner.deleteArticle(selected);
-
-                        // Remove the article from the in-memory collection.
-                        allNews.remove(selected);
-
-                        // Close and clear the autocomplete suggestions.
+                        newsCleaner.deleteArticle(selected); // remove from the database
+                        allNews.remove(selected);            // remove from the in-memory list
+                        readKeys.remove(readKey(selected));  // forget its read status
+                        saveReadState();
                         suggestionsPopup.setVisible(false);
-
-                        // Rebuild the list using the current filters.
-                        applyFilters();
-
-                        // Update the status bar.
+                        applyFilters();                      // refresh the visible list
                         setStatus("Article permanently deleted.");
-
                     } catch (Exception ex) {
-
-                        // Print details for debugging.
                         ex.printStackTrace();
-
-                        // Inform the user that deletion failed.
                         JOptionPane.showMessageDialog(
                                 NewsGUI.this,
-                                "Could not delete the article:\n"
-                                        + ex.getMessage(),
+                                "Could not delete the article:\n" + ex.getMessage(),
                                 "Database Error",
-                                JOptionPane.ERROR_MESSAGE
-                        );
+                                JOptionPane.ERROR_MESSAGE);
                     }
                 }
             }
         });
 
-        // OPEN ARTICLE:
-        // Open the selected article in the default browser.
-        openButton.addActionListener(new ActionListener() {
-            public void actionPerformed(ActionEvent e) {
-                openSelectedUrl();
-            }
-        });
+        // ----- Open in Browser (button) -----
+        openButton.addActionListener(e -> openSelectedUrl());
 
-        // DOUBLE-CLICK ARTICLE:
-        // Open the article when the user double-clicks a list entry.
+        // ----- Open in Browser (double-click on an article) -----
         newsList.addMouseListener(new MouseAdapter() {
+            @Override
             public void mouseClicked(MouseEvent e) {
+                // Find the clicked row; ignore clicks on empty space below the rows.
+                int index = newsList.locationToIndex(e.getPoint());
+                if (index >= 0) {
+                    Rectangle bounds = newsList.getCellBounds(index, index);
+                    if (bounds != null && bounds.contains(e.getPoint())) {
+                        markRead(newsModel.get(index), true);  // clicking = reading
+                    }
+                }
+
                 if (e.getClickCount() == 2) {
                     openSelectedUrl();
                 }
             }
         });
 
-        // REFRESH NEWS:
-        // Ask the external controller to download or reload articles.
-        refreshButton.addActionListener(new ActionListener() {
-            public void actionPerformed(ActionEvent e) {
-
-                // Hide autocomplete while refreshing.
-                suggestionsPopup.setVisible(false);
-
-                // Execute the refresh operation if it is configured.
-                if (refreshAction != null) {
-                    refreshAction.refresh();
-                } else {
-
-                    // Inform the user if no refresh handler exists.
-                    setStatus(
-                            "Refresh action has not been configured."
-                    );
-                }
+        // ----- Mark Read/Unread: toggles the status of the selected article -----
+        toggleReadButton.addActionListener(e -> {
+            News selected = newsList.getSelectedValue();
+            if (selected == null) {
+                JOptionPane.showMessageDialog(
+                        NewsGUI.this,
+                        "Please select an article first.",
+                        "No Article Selected",
+                        JOptionPane.INFORMATION_MESSAGE);
+                return;
             }
+
+            boolean nowRead = !isRead(selected);
+            markRead(selected, nowRead);
+            setStatus(nowRead ? "Marked as read." : "Marked as unread.");
         });
 
-        // CLEAR DATABASE:
-        // Delete all saved news and deletion records.
-        clearDatabaseButton.addActionListener(
-                new ActionListener() {
-            public void actionPerformed(ActionEvent e) {
+        // Keep the existing Refresh action.
+        refreshButton.addActionListener(e -> runRefreshAction());
 
-                // Warn the user before deleting all stored records.
+        // New Update News button uses the same configured controller action.
+        updateButton.addActionListener(e -> runRefreshAction());
+
+        // ----- Clear Database -----
+        clearDatabaseButton.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                // Warn the user: this removes everything.
                 int answer = JOptionPane.showConfirmDialog(
                         NewsGUI.this,
-                        "This will delete ALL saved news and "
-                                + "deletion records.\n\n"
-                                + "Click Refresh afterwards to download "
-                                + "news again.\n\nContinue?",
+                        "This will delete ALL saved news and deletion records.\n\n"
+                                + "Click Refresh afterwards to download news again.\n\nContinue?",
                         "Clear Database",
                         JOptionPane.YES_NO_OPTION,
-                        JOptionPane.WARNING_MESSAGE
-                );
+                        JOptionPane.WARNING_MESSAGE);
 
-                // Do nothing unless the user confirms.
                 if (answer != JOptionPane.YES_OPTION) {
                     return;
                 }
 
                 try {
-
-                    // Remove stored records through the helper class.
-                    newsCleaner.clearAll();
-
-                    // Clear the in-memory article collection.
-                    allNews.clear();
-
-                    // Clear the visible article list and details.
-                    newsModel.clear();
-                    newsContent.setText("");
-
-                    // Hide autocomplete suggestions.
+                    newsCleaner.clearAll();   // empty the database
+                    allNews.clear();          // empty the in-memory list
+                    readKeys.clear();         // forget all read statuses
+                    saveReadState();
+                    newsModel.clear();        // empty the visible list
+                    newsContent.setText("");  // clear the details panel
                     suggestionsPopup.setVisible(false);
-
-                    // Inform the user that the operation has completed.
-                    setStatus(
-                            "Database cleared. Click Refresh to reload news."
-                    );
+                    setStatus("Database cleared. Click Update News to reload news.");
 
                     JOptionPane.showMessageDialog(
                             NewsGUI.this,
-                            "Database cleared successfully.\n"
-                                    + "Click Refresh to download news again.",
+                            "Database cleared successfully.\nClick Update News to download news again.",
                             "Database Cleared",
-                            JOptionPane.INFORMATION_MESSAGE
-                    );
-
+                            JOptionPane.INFORMATION_MESSAGE);
                 } catch (Exception ex) {
-
-                    // Log the error for debugging.
                     ex.printStackTrace();
-
-                    // Inform the user that clearing failed.
                     JOptionPane.showMessageDialog(
                             NewsGUI.this,
-                            "Could not clear the database:\n"
-                                    + ex.getMessage(),
+                            "Could not clear the database:\n" + ex.getMessage(),
                             "Database Error",
-                            JOptionPane.ERROR_MESSAGE
-                    );
+                            JOptionPane.ERROR_MESSAGE);
                 }
             }
         });
 
-        // SEARCH FIELD:
-        // Listen for changes to the text entered by the user.
-        searchField.getDocument().addDocumentListener(
-                new DocumentListener() {
-
-            // Called when text is inserted.
-            public void insertUpdate(DocumentEvent e) {
+        // ----- Search field: react to every change in the text -----
+        // A DocumentListener has three methods; all of them do the same thing.
+        searchField.getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent e) {   // characters were typed/pasted
                 updateSearch();
             }
 
-            // Called when text is removed.
-            public void removeUpdate(DocumentEvent e) {
+            @Override
+            public void removeUpdate(DocumentEvent e) {   // characters were deleted
                 updateSearch();
             }
 
-            // Called when document attributes change.
-            public void changedUpdate(DocumentEvent e) {
+            @Override
+            public void changedUpdate(DocumentEvent e) {  // attribute change (rarely used)
                 updateSearch();
             }
         });
 
-        // LANGUAGE FILTER:
-        // Reapply filters whenever the selected language changes.
-        languageBox.addActionListener(new ActionListener() {
-            public void actionPerformed(ActionEvent e) {
-
-                // Close autocomplete suggestions.
-                suggestionsPopup.setVisible(false);
-
-                // Update the visible article list.
-                applyFilters();
-            }
+        // ----- Language dropdown: re-filter whenever the selection changes -----
+        languageBox.addActionListener(e -> {
+            suggestionsPopup.setVisible(false);
+            applyFilters();
         });
 
-        // ARTICLE SELECTION:
-        // Display the details of the selected article.
-        newsList.addListSelectionListener(
-                new ListSelectionListener() {
-
+        // ----- List selection: show the details of the selected article -----
+        newsList.addListSelectionListener(new ListSelectionListener() {
+            @Override
             public void valueChanged(ListSelectionEvent e) {
-
-                // Ignore intermediate events while selection is changing.
+                // getValueIsAdjusting() is true while the selection is still
+                // changing; wait until it is final to avoid duplicate updates.
                 if (!e.getValueIsAdjusting()) {
                     showSelectedNews();
                 }
             }
         });
 
-        // HIDE SUGGESTIONS WHEN FOCUS IS LOST:
-        // Close autocomplete if the search field loses focus and
-        // the popup does not own focus.
+        // ----- Hide the suggestions popup when the search field loses focus -----
         searchField.addFocusListener(new FocusAdapter() {
+            @Override
             public void focusLost(FocusEvent e) {
-
-                // Run after the current focus event has been processed.
-                SwingUtilities.invokeLater(new Runnable() {
-                    public void run() {
-
-                        if (!searchField.hasFocus()
-                                && !suggestionsPopup.isFocusOwner()) {
-
-                            // Hide the suggestions popup.
-                            suggestionsPopup.setVisible(false);
-                        }
+                // invokeLater lets the focus change finish first, so clicking
+                // a suggestion is not cancelled by the popup closing too early.
+                SwingUtilities.invokeLater(() -> {
+                    if (!searchField.hasFocus()
+                            && !suggestionsPopup.isFocusOwner()) {
+                        suggestionsPopup.setVisible(false);
                     }
                 });
             }
         });
     }
 
+    // Starts a news update through the controller (used by Refresh and Update News).
+    private void runRefreshAction() {
+        suggestionsPopup.setVisible(false);
+
+        // An update is already running: ignore the extra click.
+        if (loading) {
+            return;
+        }
+
+        // No controller connected yet: explain how to fix it.
+        if (refreshAction == null) {
+            setStatus("Refresh action has not been configured.");
+            JOptionPane.showMessageDialog(
+                    this,
+                    "Connect the controller using setRefreshAction(...), then try again.",
+                    "Update News",
+                    JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+
+        // Show the progress bar and disable the buttons.
+        setLoading(true, "Updating news...");
+        try {
+            // The controller should perform the actual download in a background
+            // thread and call setLoading(false, ...) when it finishes.
+            refreshAction.refresh();
+        } catch (RuntimeException ex) {
+            // The update could not even start: undo the loading state.
+            ex.printStackTrace();
+            setLoading(false, "News update failed.");
+            JOptionPane.showMessageDialog(
+                    this,
+                    "Could not start the news update:\n" + ex.getMessage(),
+                    "Update Error",
+                    JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
     // ------------------------------------------------------------
-    // OPEN ARTICLE IN BROWSER
+    // OPEN ARTICLE
     // ------------------------------------------------------------
 
-    /**
-     * Opens the URL of the selected article in the system's
-     * default browser.
-     *
-     * Uses Desktop.browse() when supported and provides a
-     * Windows-specific fallback.
-     */
+    // Opens the selected article's URL in the default web browser.
     private void openSelectedUrl() {
+        News news = newsList.getSelectedValue();
 
-        // Get the currently selected article.
-        News news =
-                (News) newsList.getSelectedValue();
-
-        // Stop if there is no selected article.
         if (news == null) {
             JOptionPane.showMessageDialog(
                     this,
                     "Please select an article to open.",
                     "No Article Selected",
-                    JOptionPane.INFORMATION_MESSAGE
-            );
+                    JOptionPane.INFORMATION_MESSAGE);
             return;
         }
 
-        // Obtain the article URL.
         String url = news.getUrl();
-
-        // Check that the URL is not null or empty.
-        if (url == null || url.trim().length() == 0) {
+        if (url == null || url.trim().isEmpty()) {
             setStatus("This article has no URL.");
             return;
         }
 
-        // Remove leading and trailing whitespace.
+        // Only open real web links (never file paths or other protocols).
         url = url.trim();
-
-        // Accept only strings beginning with HTTP or HTTPS.
         if (!url.matches("(?i)^https?://\\S+$")) {
             setStatus("Cannot open this URL: " + url);
             return;
         }
 
         try {
-
-            // Prefer the standard Java Desktop browsing API.
+            // First choice: Java's built-in Desktop API.
             if (Desktop.isDesktopSupported()
-                    && Desktop.getDesktop().isSupported(
-                            Desktop.Action.BROWSE)) {
-
-                // Convert the URL string to a URI and open it.
+                    && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
                 Desktop.getDesktop().browse(new URI(url));
-
+                markRead(news, true);   // opened = read
                 setStatus("Opened in browser: " + url);
                 return;
             }
 
-            // Identify the operating system if Desktop browsing
-            // is not available.
+            // Fallback for Windows when the Desktop API is unavailable.
             String os = System.getProperty("os.name");
-
-            // Use the Windows URL handler as a fallback.
-            if (os != null
-                    && os.toLowerCase(Locale.ENGLISH)
-                            .indexOf("windows") >= 0) {
-
-                Runtime.getRuntime().exec(new String[] {
-                    "rundll32",
-                    "url.dll,FileProtocolHandler",
-                    url
+            if (os != null && os.toLowerCase(Locale.ENGLISH).contains("windows")) {
+                Runtime.getRuntime().exec(new String[]{
+                    "rundll32", "url.dll,FileProtocolHandler", url
                 });
-
+                markRead(news, true);   // opened = read
                 setStatus("Opened in browser: " + url);
-
             } else {
-
-                // Display a message when browser opening is unsupported.
-                setStatus(
-                        "Browser opening is not supported on this system."
-                );
+                setStatus("Browser opening is not supported on this system.");
             }
-
         } catch (Exception ex) {
-
-            // Log the exception and update the status bar.
             ex.printStackTrace();
             setStatus("Could not open URL: " + ex.getMessage());
         }
     }
 
     // ------------------------------------------------------------
-    // METHODS USED BY SwingAplication
+    // CONTROLLER CONNECTIONS
+    // Public methods the controller (SwingAplication) calls to talk to the GUI.
     // ------------------------------------------------------------
 
-    /**
-     * Registers the external operation used by the Refresh button.
-     *
-     * The main application/controller supplies an implementation
-     * of RefreshHandler.
-     */
+    // Registers what should happen when the user clicks Refresh / Update News.
     public void setRefreshAction(RefreshHandler action) {
         refreshAction = action;
+        updateHandlerConfigured = action != null;
     }
 
-    /**
-     * Registers the external operation used by the Add URL button.
-     *
-     * The main application/controller supplies an implementation
-     * that processes the entered URL.
-     */
+    // Registers what should happen when the user adds a URL.
     public void setAddUrlAction(AddUrlHandler action) {
         addUrlAction = action;
     }
 
-    /**
-     * Receives the complete collection of news articles and refreshes
-     * the visible list according to the current search and language.
-     *
-     * Swing components should be updated on the Event Dispatch Thread.
-     */
+    // Replaces the full article list and redraws the visible list.
+    // Safe to call from any thread.
     public void setNews(List<News> news) {
-
-        // If this method is called from a background thread,
-        // schedule the update on Swing's Event Dispatch Thread.
+        // Swing components must only be changed on the Event Dispatch Thread (EDT).
+        // If we are on another thread (e.g. a download thread), copy the list
+        // and re-run this method on the EDT.
         if (!SwingUtilities.isEventDispatchThread()) {
-
-            // Copy the collection to avoid depending on the original
-            // list while the UI update is waiting to execute.
-            final List<News> copy =
-                    news == null
+            final List<News> copy = news == null
                     ? new ArrayList<News>()
                     : new ArrayList<News>(news);
-
-            SwingUtilities.invokeLater(new Runnable() {
-                public void run() {
-                    setNews(copy);
-                }
-            });
-
+            SwingUtilities.invokeLater(() -> setNews(copy));
             return;
         }
 
-        // Replace the collection used for filtering and suggestions.
+        // Store a private copy so later changes by the caller do not affect us.
         allNews = news == null
                 ? new ArrayList<News>()
                 : new ArrayList<News>(news);
-
-        // Refresh the visible article list.
         applyFilters();
     }
 
     /**
-     * Enables or disables the main controls while an operation
-     * such as downloading news is in progress.
+     * Call setLoading(false, ...) from the controller when its background
+     * download/database refresh completes, whether successful or not.
      *
-     * The message parameter optionally updates the status bar.
+     * While loading is true the progress bar is shown and the controls are
+     * disabled, so the user cannot change anything mid-update.
      */
-    public void setLoading(
-            final boolean loading, final String message) {
-
-        // Ensure component updates happen on the Event Dispatch Thread.
+    public void setLoading(final boolean isLoading, final String message) {
+        // Run on the EDT (see setNews).
         if (!SwingUtilities.isEventDispatchThread()) {
-            SwingUtilities.invokeLater(new Runnable() {
-                public void run() {
-                    setLoading(loading, message);
-                }
-            });
+            SwingUtilities.invokeLater(() -> setLoading(isLoading, message));
             return;
         }
 
-        // Hide suggestions while the application is busy.
-        if (loading) {
-            suggestionsPopup.setVisible(false);
-        }
+        loading = isLoading;
 
-        // Disable the controls when loading is true.
-        // Re-enable them when loading is false.
-        searchField.setEnabled(!loading);
-        addButton.setEnabled(!loading);
-        deleteButton.setEnabled(!loading);
-        openButton.setEnabled(!loading);
-        refreshButton.setEnabled(!loading);
-        clearDatabaseButton.setEnabled(!loading);
-        languageBox.setEnabled(!loading);
+        // Show or hide the busy indicators.
+        loadingBar.setVisible(isLoading);
+        loadingIconLabel.setVisible(isLoading);
 
-        // Update the status message if one was provided.
+        // Disable every control while loading; re-enable when finished.
+        refreshButton.setEnabled(!isLoading);
+        updateButton.setEnabled(!isLoading);
+        addButton.setEnabled(!isLoading);
+        deleteButton.setEnabled(!isLoading);
+        openButton.setEnabled(!isLoading);
+        toggleReadButton.setEnabled(!isLoading);
+        clearDatabaseButton.setEnabled(!isLoading);
+        searchField.setEnabled(!isLoading);
+        languageBox.setEnabled(!isLoading);
+
+        // Show the message both in the status line and inside the bar.
         if (message != null) {
             statusLabel.setText(message);
+            loadingBar.setString(message);
+        }
+
+        revalidate();
+        repaint();
+    }
+
+    // Updates the status line at the bottom. Safe to call from any thread.
+    public void setStatus(final String message) {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(() -> setStatus(message));
+            return;
+        }
+        // A single space keeps the label from collapsing to zero height.
+        statusLabel.setText(message == null ? " " : message);
+    }
+
+    // ------------------------------------------------------------
+    // READ / UNREAD STATUS
+    // The status is kept in a text file (READ_FILE), one key per line, so it
+    // survives restarts without changing the database.
+    // ------------------------------------------------------------
+
+    // Unique key for an article: same pair as the database primary key.
+    private String readKey(News news) {
+        String source = news.getSource() == null ? "" : news.getSource().trim();
+        String url = news.getUrl() == null ? "" : news.getUrl().trim();
+        return source + "|" + url;
+    }
+
+    // True if the article has been read.
+    private boolean isRead(News news) {
+        return news != null && readKeys.contains(readKey(news));
+    }
+
+    // Sets the read status of one article, saves it and redraws the list.
+    private void markRead(News news, boolean read) {
+        if (news == null) {
+            return;
+        }
+
+        String key = readKey(news);
+        boolean changed = read ? readKeys.add(key) : readKeys.remove(key);
+
+        if (changed) {
+            saveReadState();
+            newsList.repaint();                 // update the bold/gray rows
+            if (news == newsList.getSelectedValue()) {
+                showSelectedNews();             // update the STATUS line in the details
+            }
         }
     }
 
-    /**
-     * Updates the status bar with a message.
-     *
-     * If necessary, schedules the update on Swing's Event Dispatch
-     * Thread to keep Swing component access thread-safe.
-     */
-    public void setStatus(final String message) {
-
-        // Move the update to the Event Dispatch Thread if necessary.
-        if (!SwingUtilities.isEventDispatchThread()) {
-            SwingUtilities.invokeLater(new Runnable() {
-                public void run() {
-                    setStatus(message);
-                }
-            });
+    // Loads the read keys from the file (does nothing if it does not exist yet).
+    private void loadReadState() {
+        Path file = Paths.get(READ_FILE);
+        if (!Files.exists(file)) {
             return;
         }
 
-        // Use a blank string if the supplied message is null.
-        statusLabel.setText(message == null ? " " : message);
+        try {
+            readKeys.addAll(Files.readAllLines(file, StandardCharsets.UTF_8));
+        } catch (IOException ex) {
+            ex.printStackTrace();
+        }
+    }
+
+    // Writes all read keys to the file.
+    private void saveReadState() {
+        try {
+            Files.write(Paths.get(READ_FILE), readKeys, StandardCharsets.UTF_8);
+        } catch (IOException ex) {
+            ex.printStackTrace();
+            setStatus("Could not save read status: " + ex.getMessage());
+        }
     }
 
     // ------------------------------------------------------------
     // SEARCH AND AUTOCOMPLETE
     // ------------------------------------------------------------
 
-    /**
-     * Normalizes text before comparison.
-     *
-     * This method:
-     * 1. Handles null values.
-     * 2. Separates accented characters from their accent marks.
-     * 3. Removes accent marks.
-     * 4. Converts text to lowercase.
-     * 5. Removes leading and trailing whitespace.
-     *
-     * For example, "Știri" becomes "stiri".
-     */
+    // Prepares text for comparison: removes accents (ă -> a, ș -> s, é -> e),
+    // lower-cases it and trims spaces. Null becomes an empty string.
     private String normalizeText(String text) {
-
-        // Return an empty string if the input is null.
         if (text == null) {
             return "";
         }
 
-        return Normalizer.normalize(
-                    text, Normalizer.Form.NFD)
+        // NFD splits letters from their accent marks; \p{M} matches the marks.
+        return Normalizer.normalize(text, Normalizer.Form.NFD)
                 .replaceAll("\\p{M}", "")
                 .toLowerCase(Locale.ROOT)
                 .trim();
     }
 
-    /**
-     * Determines whether an article matches the selected language.
-     *
-     * If "All" is selected, every language is accepted.
-     */
+    // Returns true if the article's language matches the language chosen in the
+    // dropdown. Articles with no language only appear under "All".
     private boolean languageMatches(News news) {
+        String selectedLanguage = (String) languageBox.getSelectedItem();
 
-        // Read the currently selected language.
-        String selectedLanguage =
-                (String) languageBox.getSelectedItem();
-
-        // Accept all articles if no language is selected
-        // or the "All" option is selected.
-        if (selectedLanguage == null
-                || selectedLanguage.equals("All")) {
+        // "All" (or nothing selected): every article passes.
+        if (selectedLanguage == null || selectedLanguage.equalsIgnoreCase("All")) {
             return true;
         }
 
-        // Compare the article language with the selected language.
-        return news.getLanguage() != null
-                && news.getLanguage().trim()
-                        .equalsIgnoreCase(selectedLanguage);
+        // A specific language is selected but the article has none (null/empty):
+        // it cannot match. This is what happens when the language was never
+        // saved for the article.
+        String language = news.getLanguage();
+        if (language == null || language.trim().isEmpty()) {
+            return false;
+        }
+
+        language = normalizeText(language);
+
+        // Accept the language name, its native name and ISO codes
+        // (e.g. "ro", "ro-RO").
+        switch (selectedLanguage) {
+            case "Romanian":
+                return language.equals("romanian")
+                        || language.equals("romana")
+                        || language.equals("ro")
+                        || language.startsWith("ro-")
+                        || language.equals("ron");
+
+            case "English":
+                return language.equals("english")
+                        || language.equals("en")
+                        || language.startsWith("en-");
+
+            case "Hungarian":
+                return language.equals("hungarian")
+                        || language.equals("magyar")
+                        || language.equals("hu")
+                        || language.startsWith("hu-");
+
+            default:
+                // Any other language added to the dropdown later:
+                // compare by name only.
+                return language.equalsIgnoreCase(selectedLanguage);
+        }
     }
 
-    /**
-     * Updates the article list and autocomplete suggestions
-     * whenever the search field changes.
-     */
+    // Called every time the search text changes.
     private void updateSearch() {
-
-        // Apply the current search text and language filter.
-        applyFilters();
-
-        // Display matching autocomplete suggestions.
-        showTitleSuggestions();
+        applyFilters();          // narrow the main list
+        showTitleSuggestions();  // refresh the autocomplete popup
     }
 
-    /**
-     * Displays a popup menu containing article titles that
-     * match the user's current search query.
-     *
-     * Suggestions respect the selected language and are limited
-     * to MAX_SUGGESTIONS.
-     */
+    // Builds and shows the autocomplete popup under the search field:
+    // up to MAX_SUGGESTIONS titles that contain the typed text.
     private void showTitleSuggestions() {
-
-        // Close previous suggestions and remove their menu items.
+        // Start from a clean popup each time.
         suggestionsPopup.setVisible(false);
         suggestionsPopup.removeAll();
 
-        // Normalize the search text for accent-insensitive matching.
-        final String query =
-                normalizeText(searchField.getText());
+        final String query = normalizeText(searchField.getText());
 
-        // Do not display suggestions for an empty query or
-        // when the search field is disabled.
-        if (query.length() == 0 || !searchField.isEnabled()) {
+        // Nothing typed, or the field is disabled (during an update): no popup.
+        if (query.isEmpty() || !searchField.isEnabled()) {
             return;
         }
 
-        // Count the number of suggestions created.
         int count = 0;
-
-        // Examine each article in the complete news collection.
         for (News news : allNews) {
-
-            // Skip articles without a title.
-            if (news == null || news.getTitle() == null) {
+            // Skip invalid articles and ones hidden by the language filter.
+            if (news == null || news.getTitle() == null
+                    || !languageMatches(news)) {
                 continue;
             }
 
-            // Exclude articles that do not match the language filter.
-            if (!languageMatches(news)) {
-                continue;
-            }
-
-            // Obtain the title and remove surrounding whitespace.
             final String title = news.getTitle().trim();
 
-            // Check whether the normalized title contains the query.
+            // Match ignoring accents and case.
             if (normalizeText(title).contains(query)) {
+                JMenuItem suggestion = new JMenuItem(title);
 
-                // Create a clickable suggestion.
-                JMenuItem suggestion =
-                        new JMenuItem(title);
-
-                // Fill the search field when the suggestion is clicked.
-                suggestion.addActionListener(
-                        new ActionListener() {
-                    public void actionPerformed(ActionEvent e) {
-
-                        // Close the popup menu.
-                        suggestionsPopup.setVisible(false);
-
-                        // Replace the query with the selected title.
-                        searchField.setText(title);
-
-                        // Return keyboard focus to the search field.
-                        searchField.requestFocusInWindow();
-
-                        // Refresh the visible articles.
-                        applyFilters();
-                    }
+                // Clicking a suggestion copies its title into the search field.
+                suggestion.addActionListener(e -> {
+                    suggestionsPopup.setVisible(false);
+                    searchField.setText(title);
+                    searchField.requestFocusInWindow();
+                    applyFilters();
                 });
 
-                // Add the suggestion to the popup menu.
                 suggestionsPopup.add(suggestion);
                 count++;
 
-                // Stop after reaching the maximum number of suggestions.
+                // Stop once we have enough suggestions.
                 if (count >= MAX_SUGGESTIONS) {
                     break;
                 }
             }
         }
 
-        // Show the popup directly below the search field if
-        // at least one suggestion exists and the field is visible.
+        // Show the popup directly below the search field, but only if there is
+        // something to show and the field is actually on screen.
         if (count > 0 && searchField.isShowing()) {
-            suggestionsPopup.show(
-                    searchField, 0, searchField.getHeight()
-            );
+            suggestionsPopup.show(searchField, 0, searchField.getHeight());
         }
     }
 
@@ -1072,129 +936,82 @@ public class NewsGUI extends JFrame {
     // FILTER AND DISPLAY ARTICLES
     // ------------------------------------------------------------
 
-    /**
-     * Filters the complete article collection using:
-     * - The text entered in the search field.
-     * - The language selected in the dropdown.
-     *
-     * It updates the JList model and attempts to preserve the
-     * currently selected article.
-     */
+    // Rebuilds the visible list from allNews, keeping only articles that match
+    // BOTH the selected language and the search text.
     private void applyFilters() {
+        String query = normalizeText(searchField.getText());
+        String selectedLanguage = (String) languageBox.getSelectedItem();
 
-        // Normalize the search query.
-        String query =
-                normalizeText(searchField.getText());
+        // Remember the current selection so we can restore it afterwards.
+        News previouslySelected = newsList.getSelectedValue();
 
-        // Read the selected language for the status message.
-        String selectedLanguage =
-                (String) languageBox.getSelectedItem();
-
-        // Remember the selected article before rebuilding the list.
-        News previouslySelected =
-                (News) newsList.getSelectedValue();
-
-        // Remove all existing visible entries.
         newsModel.clear();
 
-        // Examine every article in the complete collection.
         for (News news : allNews) {
-
-            // Skip null entries.
             if (news == null) {
                 continue;
             }
 
-            // Normalize the title for accent-insensitive matching.
-            String title =
-                    normalizeText(news.getTitle());
+            String title = normalizeText(news.getTitle());
 
-            // Add the article only if both filters match.
-            if (languageMatches(news)
-                    && title.contains(query)) {
+            // An empty query matches every title, since contains("") is true.
+            if (languageMatches(news) && title.contains(query)) {
                 newsModel.addElement(news);
             }
         }
 
-        // Preserve the old selection if the article is still visible.
-        if (previouslySelected != null
-                && newsModel.contains(previouslySelected)) {
-
+        // Restore the old selection if the article is still visible; otherwise
+        // select the first one; if the list is empty, clear the details panel.
+        if (previouslySelected != null && newsModel.contains(previouslySelected)) {
             newsList.setSelectedValue(previouslySelected, true);
-
         } else if (!newsModel.isEmpty()) {
-
-            // Otherwise select the first visible article.
             newsList.setSelectedIndex(0);
-
         } else {
-
-            // Clear the details panel if no articles match.
             newsContent.setText("");
         }
 
-        // Prepare a status message showing the number of results.
-        String message = "Showing "
-                + newsModel.size() + " article(s)";
-
-        // Include the selected language when it is not "All".
-        if (selectedLanguage != null
-                && !selectedLanguage.equals("All")) {
+        // Status line, e.g. "Showing 12 article(s) in Romanian."
+        String message = "Showing " + newsModel.size() + " article(s)";
+        if (selectedLanguage != null && !selectedLanguage.equals("All")) {
             message += " in " + selectedLanguage;
         }
-
-        // Display the final status message.
         statusLabel.setText(message + ".");
     }
 
-    /**
-     * Displays the details of the currently selected article
-     * in the newsContent text area.
-     */
+    // Fills the right-hand panel with the details of the selected article.
     private void showSelectedNews() {
-
-        // Retrieve the selected article.
-        News news =
-                (News) newsList.getSelectedValue();
-
-        // Clear the details area if there is no selection.
+        News news = newsList.getSelectedValue();
         if (news == null) {
             newsContent.setText("");
             return;
         }
 
-        // Display the article information using section headings.
+        // Each section has a heading, a line of "=" and the value.
+        // safeText() replaces missing values with "(Not available)".
         newsContent.setText(
                 "TITLE\n"
                 + "========================================\n\n"
                 + safeText(news.getTitle()) + "\n\n"
-
                 + "SOURCE\n"
                 + "========================================\n\n"
                 + safeText(news.getSource()) + "\n\n"
-
+                + "STATUS\n"
+                + "========================================\n\n"
+                + (isRead(news) ? "Read" : "Unread") + "\n\n"
                 + "DESCRIPTION\n"
                 + "========================================\n\n"
                 + safeText(news.getDescription()) + "\n\n"
-
                 + "URL\n"
                 + "========================================\n\n"
-                + safeText(news.getUrl())
-        );
+                + safeText(news.getUrl()));
 
-        // Move the caret to the beginning of the text area.
+        // Scroll back to the top (setText leaves the caret at the end).
         newsContent.setCaretPosition(0);
     }
 
-    /**
-     * Returns the provided text if it is available.
-     *
-     * If the text is null or blank, returns "(Not available)"
-     * to avoid displaying empty article fields.
-     */
+    // Returns the text, or "(Not available)" if it is null or blank.
     private String safeText(String text) {
-
-        return text == null || text.trim().length() == 0
+        return text == null || text.trim().isEmpty()
                 ? "(Not available)"
                 : text;
     }

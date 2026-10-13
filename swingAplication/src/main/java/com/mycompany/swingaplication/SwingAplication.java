@@ -1,10 +1,18 @@
-
 package com.mycompany.swingaplication;
 
 // Import Swing utilities for safely creating the GUI
 // and performing background tasks.
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
+
+// Used to save and read the feeds added with the Add URL button.
+import java.io.IOException;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 
 // Import collections used to store news articles and deleted article keys.
 import java.util.ArrayList;
@@ -14,19 +22,23 @@ import java.util.Set;
 /**
  * Main class of the news application.
  *
- * This class starts the graphical interface, connects the Refresh button
- * to the news-loading process, and loads news from configured RSS sources.
+ * This class starts the graphical interface, connects the Refresh and
+ * Add URL buttons to the news-loading process, and loads news from the
+ * configured RSS sources (RSS.json plus the feeds added with Add URL).
  *
  * It also saves downloaded articles to the database and prevents articles
  * previously deleted by the user from being loaded again.
  */
 public class SwingAplication {
 
+    // File (in the program's working folder) that remembers the feeds the user
+    // added with Add URL. One feed per line: name|url|language
+    private static final String CUSTOM_FEEDS_FILE = "custom_feeds.txt";
+
     // Main method: the entry point of the Java application.
     public static void main(String[] args) {
 
         // Create and display Swing components on the Event Dispatch Thread.
-        // This is the recommended thread for creating and updating Swing GUIs.
         SwingUtilities.invokeLater(new Runnable() {
             public void run() {
 
@@ -34,9 +46,25 @@ public class SwingAplication {
                 final NewsGUI gui = new NewsGUI();
 
                 // Connect the Refresh button to the RSS loading process.
-                // When the user clicks Refresh, loadNews() is executed.
                 gui.setRefreshAction(new NewsGUI.RefreshHandler() {
                     public void refresh() {
+                        loadNews(gui);
+                    }
+                });
+
+                // Connect the Add URL button.
+                // The feed is remembered in custom_feeds.txt and then all news
+                // is loaded again, so the new feed is downloaded, saved to the
+                // database and shown. Because it is remembered, it is also
+                // included in every later Refresh and after restarting.
+                gui.setAddUrlAction(new NewsGUI.AddUrlHandler() {
+                    public void addUrl(String url, String language) {
+                        try {
+                            saveCustomSource(url, language);
+                        } catch (IOException e) {
+                            gui.setStatus("Could not save the feed: " + e.getMessage());
+                            return;
+                        }
                         loadNews(gui);
                     }
                 });
@@ -51,6 +79,66 @@ public class SwingAplication {
     }
 
     // ------------------------------------------------------------
+    // FEEDS ADDED WITH THE "ADD URL" BUTTON
+    // ------------------------------------------------------------
+
+    // Reads the saved feeds from custom_feeds.txt (empty list if no file yet).
+    private static List<RSSSource> loadCustomSources() {
+        List<RSSSource> result = new ArrayList<RSSSource>();
+        Path file = Paths.get(CUSTOM_FEEDS_FILE);
+
+        if (!Files.exists(file)) {
+            return result;
+        }
+
+        try {
+            for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
+                // Each line is: name|url|language
+                String[] parts = line.split("\\|");
+                if (parts.length == 3) {
+                    result.add(new RSSSource(parts[0], parts[1], parts[2]));
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        return result;
+    }
+
+    // Adds a feed to custom_feeds.txt (does nothing if it is already saved).
+    private static void saveCustomSource(String url, String language)
+            throws IOException {
+
+        // Already saved: nothing to do.
+        for (RSSSource existing : loadCustomSources()) {
+            if (existing.getUrl().equalsIgnoreCase(url)) {
+                return;
+            }
+        }
+
+        // Use the website name (e.g. "bbci.co.uk") as the source name.
+        String name = url;
+        try {
+            name = new URL(url).getHost();
+        } catch (Exception ignored) {
+            // Keep the full URL as the name.
+        }
+        if (name.startsWith("www.")) {
+            name = name.substring(4);
+        }
+
+        String line = name + "|" + url + "|" + language + System.lineSeparator();
+
+        // CREATE: make the file if needed. APPEND: add to the end.
+        Files.write(
+                Paths.get(CUSTOM_FEEDS_FILE),
+                line.getBytes(StandardCharsets.UTF_8),
+                StandardOpenOption.CREATE,
+                StandardOpenOption.APPEND);
+    }
+
+    // ------------------------------------------------------------
     // LOAD NEWS FROM RSS SOURCES
     // ------------------------------------------------------------
 
@@ -59,15 +147,12 @@ public class SwingAplication {
      *
      * A SwingWorker is used so that database operations and RSS downloads
      * run in the background without freezing the graphical interface.
-     *
-     *   the graphical interface that displays the news
      */
     private static void loadNews(final NewsGUI gui) {
 
         // Disable relevant controls and display a loading message.
         gui.setLoading(true, "Loading news...");
 
-        // SwingWorker separates background processing from GUI updates.
         // List<News> is the background task's result type.
         // String is the type of progress messages sent to the GUI.
         SwingWorker<List<News>, String> worker =
@@ -95,8 +180,7 @@ public class SwingAplication {
                     NewsCleaner cleaner = new NewsCleaner();
 
                     // Load the unique keys of articles previously deleted
-                    // by the user. These articles should not reappear
-                    // during subsequent RSS refreshes.
+                    // by the user, so they do not reappear.
                     Set<String> deletedKeys =
                             cleaner.loadDeletedKeys();
 
@@ -109,12 +193,29 @@ public class SwingAplication {
                     // Stop if the configuration or source list is missing.
                     if (sources == null
                             || sources.getRssSources() == null) {
-
-                        // Inform the user that no sources are configured.
                         publish("No RSS sources found.");
-
-                        // Return an empty collection of articles.
                         return allNews;
+                    }
+
+                    // Combine the sources from RSS.json with the feeds added
+                    // using Add URL. A feed that is already in RSS.json is
+                    // not added a second time.
+                    List<RSSSource> allSources = new ArrayList<RSSSource>();
+                    for (RSSSource source : sources.getRssSources()) {
+                        allSources.add(source);
+                    }
+                    for (RSSSource custom : loadCustomSources()) {
+                        boolean duplicate = false;
+                        for (RSSSource source : allSources) {
+                            if (source.getUrl() != null
+                                    && source.getUrl().equalsIgnoreCase(custom.getUrl())) {
+                                duplicate = true;
+                                break;
+                            }
+                        }
+                        if (!duplicate) {
+                            allSources.add(custom);
+                        }
                     }
 
                     // Create the service responsible for downloading
@@ -128,8 +229,7 @@ public class SwingAplication {
                     // PROCESS EACH RSS SOURCE
                     // ------------------------------------------------
 
-                    // Download articles from every configured RSS source.
-                    for (RSSSource source : sources.getRssSources()) {
+                    for (RSSSource source : allSources) {
 
                         // Display the name of the source currently being loaded.
                         publish("Loading: " + source.getName());
@@ -153,8 +253,6 @@ public class SwingAplication {
                                 }
 
                                 // Skip articles previously deleted by the user.
-                                // NewsCleaner.key() creates the key used to
-                                // identify an article in the deletion records.
                                 if (deletedKeys.contains(
                                         NewsCleaner.key(article))) {
                                     continue;
@@ -164,18 +262,13 @@ public class SwingAplication {
                                 // eventually be displayed in the GUI.
                                 allNews.add(article);
 
-                                // ------------------------------------
-                                // SAVE ARTICLE TO THE DATABASE
-                                // ------------------------------------
-
+                                // Save the article to the database.
                                 try {
-                                    // Insert or update the article in the database.
                                     newsDAO.save(article);
 
                                 } catch (Exception e) {
-
-                                    // Report a database-saving error without
-                                    // stopping the processing of other articles.
+                                    // Report a saving error without stopping
+                                    // the processing of other articles.
                                     publish("Could not save article: "
                                             + e.getMessage());
                                 }
@@ -184,7 +277,7 @@ public class SwingAplication {
                         } catch (Exception e) {
 
                             // Report an error for this RSS source.
-                            // The loop can continue with the next source.
+                            // The loop continues with the next source.
                             publish("Could not load "
                                     + source.getName() + ": "
                                     + e.getMessage());
@@ -198,8 +291,7 @@ public class SwingAplication {
                     publish("News loading failed: " + e.getMessage());
                 }
 
-                // Return all collected articles to the SwingWorker.
-                // The done() method retrieves this result.
+                // Return all collected articles; done() retrieves this result.
                 return allNews;
             }
 
@@ -213,8 +305,6 @@ public class SwingAplication {
 
                 // Display each progress message in the GUI status bar.
                 for (String message : messages) {
-
-                    // Update the status text in the application window.
                     gui.setStatus(message);
 
                     // Also print the message to the console for debugging.
@@ -235,7 +325,6 @@ public class SwingAplication {
                     List<News> articles = get();
 
                     // Pass the downloaded articles to the GUI.
-                    // NewsGUI updates its article list and applies filters.
                     gui.setNews(articles);
 
                     // Display the total number of collected articles.

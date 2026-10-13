@@ -51,6 +51,10 @@ public class Events extends News {
     public String getLocation() {
         return location;
     }
+    //It changes the location
+    public void setLocation(String location) {
+    this.location = location;
+}
 
     // Overrides the toString() method inherited from News.
     // When an Events object is displayed as text,
